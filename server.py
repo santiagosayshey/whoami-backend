@@ -5,6 +5,7 @@ from werkzeug.security import check_password_hash
 from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi
 from pymongo.errors import DuplicateKeyError
+from bson.objectid import ObjectId
 import logging
 
 app = Flask(__name__)
@@ -17,6 +18,7 @@ uri = "mongodb+srv://santiagosayshey:d43jKVixZuvDxe2B@whoami.hlbxfgv.mongodb.net
 client = MongoClient(uri, server_api=ServerApi('1'))
 db = client.whoami 
 users_collection = db.users
+questions_collection = db.questions
 
 @app.route('/signup', methods=['POST'])
 def signup():
@@ -31,19 +33,18 @@ def signup():
     hashed_password = generate_password_hash(password)
 
     try:
-        users_collection.insert_one({
+        result = users_collection.insert_one({
             "firstName": firstName,
             "lastName": lastName,
             "password": hashed_password,
             "email": email
         })
-        app.logger.debug('User created successfully')
-        # Now automatically log the user in after signup
-        # Since we just checked the password, we know this should succeed
-        return jsonify({"message": "User created and logged in successfully", "user": {"firstName": firstName, "lastName": lastName, "email": email}}), 201
+        user_id = result.inserted_id
+        return jsonify({"message": "User created and logged in successfully", "user": {"_id": str(user_id), "firstName": firstName, "lastName": lastName, "email": email}}), 201
     except DuplicateKeyError as e:
         app.logger.error('Duplicate key error: %s', e)
         return jsonify({"error": "Email already exists."}), 409
+
     
 
 @app.route('/login', methods=['POST'])
@@ -58,18 +59,66 @@ def login():
         return jsonify({"error": "Please provide email and password."}), 400
 
     user = users_collection.find_one({"email": email})
-    if user:
-        app.logger.debug('User found in database: %s', user)
-    else:
-        app.logger.debug('No user found with email: %s', email)
-        return jsonify({"error": "Invalid email or password."}), 401
-
-    if check_password_hash(user['password'], password):
+    if user and check_password_hash(user['password'], password):
         app.logger.debug('Password check passed')
-        return jsonify({"message": "Login successful", "user": {"firstName": user["firstName"], "lastName": user["lastName"], "email": user["email"]}}), 200
+        # Include the _id in the response
+        return jsonify({"message": "Login successful", "user": {"_id": str(user["_id"]), "firstName": user["firstName"], "lastName": user["lastName"], "email": user["email"]}}), 200
     else:
         app.logger.debug('Password check failed')
         return jsonify({"error": "Invalid email or password."}), 401
+
+    
+@app.route('/questions/<user_id>', methods=['GET'])
+def get_questions(user_id):
+    try:
+        app.logger.debug(f"Fetching questions for user {user_id}")
+        user_questions = questions_collection.find({"user_id": ObjectId(user_id)})
+        questions_list = [{"_id": str(q["_id"]), "text": q["text"]} for q in user_questions]
+        
+        return jsonify({"questions": questions_list}), 200
+
+    except Exception as e:
+        app.logger.error(f"Error fetching questions for user {user_id}: {str(e)}")
+        return jsonify({"error": "Error fetching questions"}), 500
+
+
+
+@app.route('/questions/<user_id>', methods=['POST'])
+def add_question(user_id):
+    try:
+        question_text = request.json.get('text', None)
+        
+        if not question_text:
+            return jsonify({"error": "No question text provided"}), 400
+
+        # Create a new document for the question
+        result = questions_collection.insert_one({
+            "text": question_text,
+            "user_id": ObjectId(user_id)  # Store the user_id as an ObjectId
+        })
+
+        return jsonify({"message": "Question added successfully", "question_id": str(result.inserted_id)}), 201
+    except Exception as e:
+        app.logger.error("Error adding question for user {}: {}".format(user_id, str(e)))
+        return jsonify({"error": "Error adding question"}), 500
+
+
+@app.route('/questions/<user_id>/<question_id>', methods=['DELETE'])
+def delete_question(user_id, question_id):
+    try:
+        # Convert question_id from string to ObjectId
+        oid_question = ObjectId(question_id)
+
+        # Directly delete the question document
+        result = questions_collection.delete_one({"_id": oid_question})
+
+        if result.deleted_count > 0:
+            return jsonify({"message": "Question deleted successfully"}), 200
+        else:
+            return jsonify({"error": "Failed to delete question"}), 404  # Not found or already deleted
+    except Exception as e:
+        app.logger.error("Error deleting question for user {}: {}".format(user_id, str(e)))
+        return jsonify({"error": "Error deleting question"}), 500
 
 
 if __name__ == '__main__':
